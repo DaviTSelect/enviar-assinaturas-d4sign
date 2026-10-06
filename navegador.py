@@ -19,6 +19,10 @@ def realizar_login():
 
     driver.get("https://secure.d4sign.com.br/login.html")
 
-    input("Digite ENTER para fechar...")
+    
 
     return driver
+
+def enviar_assinatura(driver):
+    input("Digite ENTER para fechar...")
+    
