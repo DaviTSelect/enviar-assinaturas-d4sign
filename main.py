@@ -1,4 +1,4 @@
-from navegador import realizar_login
+from interface import Interface
 
 if __name__ == "__main__":
-    navegador = realizar_login()
+    Interface()
