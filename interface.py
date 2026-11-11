@@ -1036,10 +1036,15 @@ class Interface(QWidget):
         try:
             from updater import verificar_atualizacao
             resultado = verificar_atualizacao()
-            if resultado.get("versao_mais_nova") or resultado.get("disponivel"):
+            if resultado.get("disponivel"):
                 self._info_update = resultado
                 v = resultado.get("versao_nova", "")
-                self._sinal_update.emit(f'● Nova versão {v} — clique para atualizar', '#e9a833')
+                self._sinal_update.emit(f'⬇ Atualizando para v{v}...', '#e9a833')
+                self._baixar_e_aplicar()
+            elif resultado.get("versao_mais_nova"):
+                self._info_update = resultado
+                v = resultado.get("versao_nova", "")
+                self._sinal_update.emit(f'● Nova versão {v} disponível', '#e9a833')
             else:
                 self._sinal_update.emit(f'● v{VERSION} — atualizado', '#5aaa7a')
         except Exception:
@@ -1059,19 +1064,13 @@ class Interface(QWidget):
     def _iniciar_atualizacao(self):
         if not self._info_update:
             return
-        url      = self._info_update.get("url_download", "")
-        versao   = self._info_update.get("versao_nova", "")
+        url    = self._info_update.get("url_download", "")
+        versao = self._info_update.get("versao_nova", "")
         if not url:
             _dialogo(self, 'Atualização disponível',
                      f'Nova versão {versao} disponível!\n'
                      'Baixe manualmente em:\ngithub.com/DaviTSelect/enviar-assinaturas-d4sign/releases/latest',
                      QMessageBox.Information)
-            return
-        resp = _dialogo(self, 'Atualizar agora?',
-                        f'Nova versão {versao} disponível!\n\n'
-                        'O programa vai baixar a atualização, fechar e reabrir automaticamente.\n\nContinuar?',
-                        QMessageBox.Question, QMessageBox.Yes | QMessageBox.No)
-        if resp != QMessageBox.Yes:
             return
         self._btn_update.setEnabled(False)
         self._sinal_update.emit('⬇ Baixando atualização...', '#2563a8')
@@ -1097,9 +1096,6 @@ class Interface(QWidget):
             self._btn_update.setEnabled(True)
 
     def _ao_update_concluido(self):
-        _dialogo(self, 'Atualização pronta',
-                 'Download concluído!\n\nO programa será fechado e a nova versão abrirá automaticamente.',
-                 QMessageBox.Information)
         self.close()
 
     def closeEvent(self, event):
