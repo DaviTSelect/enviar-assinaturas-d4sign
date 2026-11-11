@@ -18,9 +18,7 @@ echo Versao: %VERSION%
 echo.
 
 echo [1/4] Gerando icone...
-if not exist "logo.ico" (
-    %PY% create_icon.py
-)
+%PY% create_icon.py
 
 echo [2/4] Instalando dependencias de build...
 %PIP% install -r requirements-build.txt -q

@@ -53,10 +53,8 @@ echo.
 :: PASSO 2: Gerar icone
 :: ===================================================
 echo [2/6] Gerando icone...
-if not exist "logo.ico" (
-    %PY% create_icon.py
-    if %ERRORLEVEL% neq 0 ( echo AVISO: nao foi possivel gerar logo.ico )
-)
+%PY% create_icon.py
+if %ERRORLEVEL% neq 0 ( echo AVISO: nao foi possivel gerar logo.ico )
 
 :: ===================================================
 :: PASSO 3: Instalar dependencias de build
