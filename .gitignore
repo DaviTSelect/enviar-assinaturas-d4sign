@@ -80,6 +80,7 @@ PDFs/documentos gerados
 *.docx
 *.xls
 *.xlsx
+!planilha_exemplo.xlsx
 *.csv
 
 =========================

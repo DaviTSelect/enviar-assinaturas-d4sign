@@ -101,13 +101,43 @@ if %ERRORLEVEL% neq 0 (
 
 set NOTES_FILE=%TEMP%\release_notes_%VERSION%.md
 (
-    echo ## Instalacao
+    echo ## O que e este programa?
     echo.
-    echo 1. Baixe **EnviarAssinaturas.exe**
-    echo 2. Baixe **.env.example**, renomeie para **.env** e preencha as credenciais
-    echo 3. Baixe **planilha_exemplo.xlsx** como modelo para seus documentos
-    echo 4. Coloque os tres arquivos na mesma pasta
-    echo 5. Execute EnviarAssinaturas.exe
+    echo Automatiza o envio de documentos para assinatura no D4Sign. Voce prepara uma planilha com os emails dos signatarios, o programa abre o D4Sign, faz login e adiciona os destinatarios automaticamente.
+    echo.
+    echo ---
+    echo.
+    echo ## Instalacao ^(primeira vez^)
+    echo.
+    echo 1. Baixe os 3 arquivos abaixo:
+    echo    - **EnviarAssinaturas.exe** — o programa
+    echo    - **.env.example** — modelo de configuracao
+    echo    - **planilha_exemplo.xlsx** — modelo da planilha de emails
+    echo.
+    echo 2. Crie uma pasta em qualquer lugar ^(ex: `C:\EnviarAssinaturas`^) e coloque os 3 arquivos la dentro.
+    echo.
+    echo 3. Renomeie **.env.example** para **.env** e abra com o Bloco de Notas:
+    echo    - `USUARIO=` coloque seu email de login do D4Sign
+    echo    - `SENHA=` coloque sua senha do D4Sign
+    echo    - `EMAIL_DIRETOR=` coloque o email do diretor ^(sempre sera adicionado por ultimo^)
+    echo    - Salve e feche o arquivo
+    echo.
+    echo 4. Execute **EnviarAssinaturas.exe**.
+    echo.
+    echo ---
+    echo.
+    echo ## Como usar
+    echo.
+    echo 1. Abra o programa — ele inicia maximizado automaticamente
+    echo 2. Clique em **Selecionar Planilha** e escolha seu arquivo .xlsx com os emails
+    echo    - Use **planilha_exemplo.xlsx** como modelo: coloque os emails dos signatarios na coluna indicada
+    echo 3. Clique em **Enviar** — o programa abre o D4Sign, faz login e adiciona os emails
+    echo 4. O email do diretor ^(configurado no .env^) sera sempre adicionado por ultimo automaticamente
+    echo 5. Emails duplicados sao ignorados automaticamente
+    echo.
+    echo > O programa busca atualizacoes automaticamente ao iniciar e aplica sem precisar de confirmacao.
+    echo.
+    echo ---
     echo.
     echo **SHA-256:** `%SHA256%`
 ) > "%NOTES_FILE%"
