@@ -48,10 +48,12 @@ jobs:
           # Verifica se a release ja existe (criada pelo release.bat)
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release $tag ja existe — anexando EXE..."
+            Write-Host "Release $tag ja existe — anexando assets..."
             gh release upload $tag `
               dist\EnviarAssinaturas.exe `
               dist\EnviarAssinaturas.exe.sha256 `
+              .env.example `
+              planilha_exemplo.xlsx `
               --repo $env:GITHUB_REPOSITORY `
               --clobber
           } else {
@@ -59,6 +61,8 @@ jobs:
             gh release create $tag `
               dist\EnviarAssinaturas.exe `
               dist\EnviarAssinaturas.exe.sha256 `
+              .env.example `
+              planilha_exemplo.xlsx `
               --repo $env:GITHUB_REPOSITORY `
               --title "Enviar Assinaturas D4Sign $tag" `
               --notes "Release gerado automaticamente pelo GitHub Actions."

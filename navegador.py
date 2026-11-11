@@ -18,8 +18,9 @@ from selenium.common.exceptions import TimeoutException
 _env_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 load_dotenv(_env_dir / ".env")
 
-USUARIO = os.getenv("USUARIO")
-SENHA = os.getenv("SENHA")
+USUARIO             = os.getenv("USUARIO")
+SENHA               = os.getenv("SENHA")
+EMAIL_DIRETOR = (os.getenv("EMAIL_DIRETOR") or "").strip().lower()
 ID_CHECKBOX_ASSINATURAS = "checkboxFluxo"
 
 # Logs persistentes ao lado do executável, não dentro do _MEI temp dir
@@ -370,16 +371,33 @@ class Navegador:
         print(f"Signatário adicionado: {email}")
 
     def adicionar_emails(self, emails):
-        emails = list(dict.fromkeys(email.strip() for email in emails if email and email.strip()))
-        if not emails:
+        # Normalizar para lowercase — email é case-insensitive; evita duplicatas por diferença de caixa
+        brutos = list(dict.fromkeys(
+            e.strip().lower() for e in emails if e and e.strip()
+        ))
+        if not brutos:
             raise ValueError("Adicione ao menos um e-mail de signatário.")
-        print(f"Adicionando {len(emails)} signatário(s)...")
-        for indice, email in enumerate(emails, start=1):
-            print(f"[{indice}/{len(emails)}] Adicionando {email}...")
+
+        # ── Montar ordem: pessoa(s)/coordenador (planilha) → diretor (.env) ──
+        # Diretor sempre no final — remove da posição atual se vier na planilha
+        emails_sem_diretor = [e for e in brutos if e != EMAIL_DIRETOR]
+        emails_diretor     = [EMAIL_DIRETOR] if EMAIL_DIRETOR else []
+
+        # Lista final — deduplicação por segurança (todos já em lowercase)
+        vistos: set = set()
+        emails_final = []
+        for e in emails_sem_diretor + emails_diretor:
+            if e and e not in vistos:
+                vistos.add(e)
+                emails_final.append(e)
+
+        print(f"Adicionando {len(emails_final)} signatário(s) — ordem: pessoa › coordenador › diretor")
+        for indice, email in enumerate(emails_final, start=1):
+            print(f"[{indice}/{len(emails_final)}] {email}")
             self.adicionar_email(email)
 
-        # Checkbox de fluxo só aparece quando há mais de um signatário.
-        if len(emails) > 1:
+        # Checkbox de fluxo — só aparece com mais de um signatário
+        if len(emails_final) > 1:
             try:
                 checkbox = WebDriverWait(self.driver, 10).until(
                     EC.element_to_be_clickable((By.ID, ID_CHECKBOX_ASSINATURAS))
@@ -391,8 +409,90 @@ class Navegador:
                     lambda driver: driver.execute_script("return document.readyState") == "complete"
                 )
             except TimeoutException:
-                print("Checkbox de fluxo não encontrado mesmo com múltiplos e-mails — prosseguindo.")
+                print("Checkbox de fluxo não encontrado — prosseguindo.")
+
+        # Confirmação final: garante que o diretor está na última posição
+        if EMAIL_DIRETOR:
+            self._garantir_diretor_no_final()
+
         print("Todos os e-mails foram adicionados.")
+
+    # ── Garantia de posição do diretor ────────────────────────────────────────
+
+    def _garantir_diretor_no_final(self):
+        """
+        Verifica se EMAIL_DIRETOR está na lista de signatários.
+        Se existir mas NÃO for o último, remove via JS e readiciona para garantir a ordem.
+        """
+        self._aguardar_pagina_livre()
+
+        if not self.driver.find_elements(By.ID, "lista-assinatura"):
+            return
+
+        lista_texto = self.driver.find_element(By.ID, "lista-assinatura").text.lower()
+        if EMAIL_DIRETOR not in lista_texto:
+            print(f"Diretor ({EMAIL_DIRETOR}) não está na lista — sem ação.")
+            return
+
+        # Checar posição atual via JS (mais confiável que parsing de texto)
+        resultado = self.driver.execute_script("""
+            var email = arguments[0];
+            var inputs = document.querySelectorAll('input[name="ordemEnvio"]');
+            var total = inputs.length;
+            var posicao = -1;
+            var tds = document.querySelectorAll('td.text-left');
+            for (var i = 0; i < tds.length; i++) {
+                if (tds[i].textContent.toLowerCase().indexOf(email) !== -1) {
+                    var tr = tds[i].closest('tr');
+                    var inp = tr ? tr.querySelector('input[name="ordemEnvio"]') : null;
+                    if (inp) posicao = parseInt(inp.value);
+                    break;
+                }
+            }
+            return [total, posicao];
+        """, EMAIL_DIRETOR)
+
+        total, posicao = resultado
+        if posicao < 0 or posicao == total:
+            print(f"Diretor na posição {posicao}/{total} — OK.")
+            return
+
+        print(f"Diretor na posição {posicao}/{total} — reposicionando para o final...")
+
+        # Obter o href do link removerAssinatura do row do diretor via JS
+        href_remover = self.driver.execute_script("""
+            var email = arguments[0];
+            var tds = document.querySelectorAll('td.text-left');
+            for (var i = 0; i < tds.length; i++) {
+                if (tds[i].textContent.toLowerCase().indexOf(email) !== -1) {
+                    var tr = tds[i].closest('tr');
+                    var link = tr ? tr.querySelector('a[href*="removerAssinatura"]') : null;
+                    return link ? link.getAttribute('href') : null;
+                }
+            }
+            return null;
+        """, EMAIL_DIRETOR)
+
+        if not href_remover:
+            print("Link remover do diretor não encontrado — pulando reordenação.")
+            return
+
+        # Executar removerAssinatura diretamente via JS (evita fragilidade de dropdown)
+        js_call = href_remover.replace("javascript: ", "").replace("javascript:", "").strip()
+        self.driver.execute_script(js_call)
+
+        # Aguardar o diretor sumir da lista
+        WebDriverWait(self.driver, 15).until(
+            lambda d: not d.find_elements(By.ID, "lista-assinatura") or
+                      EMAIL_DIRETOR not in
+                      d.find_element(By.ID, "lista-assinatura").text.lower()
+        )
+        self._aguardar_pagina_livre()
+        print(f"Removido. Readicionando {EMAIL_DIRETOR} no final...")
+
+        # Readicionar — ficará na última posição
+        self.adicionar_email(EMAIL_DIRETOR)
+        print(f"Diretor reposicionado para a posição {total}.")
     def envio_para_assinatura(self, texto):
         if not texto or not texto.strip():
             raise ValueError("O texto da mensagem para assinatura não pode ficar vazio.")

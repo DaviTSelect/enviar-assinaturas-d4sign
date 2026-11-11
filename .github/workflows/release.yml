@@ -57,5 +57,5 @@ jobs:
         run: |
           $hash = (Get-FileHash dist\EnviarAssinaturas.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  EnviarAssinaturas.exe" | Out-File -Encoding utf8 dist\EnviarAssinaturas.exe.sha256
-          gh release upload $env:GITHUB_REF_NAME dist\EnviarAssinaturas.exe dist\EnviarAssinaturas.exe.sha256 --repo $env:GITHUB_REPOSITORY
+          gh release upload $env:GITHUB_REF_NAME dist\EnviarAssinaturas.exe dist\EnviarAssinaturas.exe.sha256 .env.example planilha_exemplo.xlsx --repo $env:GITHUB_REPOSITORY
           Write-Host "EXE anexado com sucesso."

@@ -377,7 +377,7 @@ class Interface(QWidget):
         self._sinal_update_concluido.connect(self._ao_update_concluido)
 
         self._atualizar_estado()
-        self.show()
+        self.showMaximized()
         threading.Thread(target=self._verificar_atualizacoes_bg, daemon=True).start()
         sys.exit(self._app.exec())
 

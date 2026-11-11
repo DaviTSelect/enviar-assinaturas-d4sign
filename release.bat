@@ -103,9 +103,11 @@ set NOTES_FILE=%TEMP%\release_notes_%VERSION%.md
 (
     echo ## Instalacao
     echo.
-    echo 1. Baixe EnviarAssinaturas.exe
-    echo 2. Coloque na mesma pasta que o arquivo .env
-    echo 3. Execute EnviarAssinaturas.exe
+    echo 1. Baixe **EnviarAssinaturas.exe**
+    echo 2. Baixe **.env.example**, renomeie para **.env** e preencha as credenciais
+    echo 3. Baixe **planilha_exemplo.xlsx** como modelo para seus documentos
+    echo 4. Coloque os tres arquivos na mesma pasta
+    echo 5. Execute EnviarAssinaturas.exe
     echo.
     echo **SHA-256:** `%SHA256%`
 ) > "%NOTES_FILE%"
@@ -113,6 +115,8 @@ set NOTES_FILE=%TEMP%\release_notes_%VERSION%.md
 gh release create %TAG% ^
     "dist\EnviarAssinaturas.exe" ^
     "dist\EnviarAssinaturas.exe.sha256" ^
+    ".env.example" ^
+    "planilha_exemplo.xlsx" ^
     --title "Enviar Assinaturas D4Sign %TAG%" ^
     --notes-file "%NOTES_FILE%"
 

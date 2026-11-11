@@ -152,6 +152,27 @@ agente.md
 logo.ico
 mensagem.md
 
+=========================
+Build artifacts / executáveis
+=========================
+
+*.exe
+*.exe.new
+*.zip
+*.png
+*.ico
+!logo_facto.ico
+
+=========================
+Documentação interna (não vai pro repo)
+=========================
+
+*.md
+relatorio.md
+docs/
+releases/
+requeriments.txt
+
 
 
 .local
