@@ -1,0 +1,66 @@
+name: Build and Release
+
+# Dispara quando uma tag vX.Y.Z é enviada (via release.bat ou manualmente)
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-build.txt -q
+
+      - name: Gerar icone
+        run: python create_icon.py
+
+      - name: Compilar executavel
+        run: pyinstaller main.spec --noconfirm
+
+      - name: Calcular SHA-256
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\EnviarAssinaturas.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  EnviarAssinaturas.exe" | Out-File -Encoding utf8 dist\EnviarAssinaturas.exe.sha256
+          Write-Host "SHA-256: $hash"
+
+      - name: Publicar release (ou anexar a existente)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+
+          # Verifica se a release ja existe (criada pelo release.bat)
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag ja existe — anexando EXE..."
+            gh release upload $tag `
+              dist\EnviarAssinaturas.exe `
+              dist\EnviarAssinaturas.exe.sha256 `
+              --repo $env:GITHUB_REPOSITORY `
+              --clobber
+          } else {
+            Write-Host "Criando release $tag..."
+            gh release create $tag `
+              dist\EnviarAssinaturas.exe `
+              dist\EnviarAssinaturas.exe.sha256 `
+              --repo $env:GITHUB_REPOSITORY `
+              --title "Enviar Assinaturas D4Sign $tag" `
+              --notes "Release gerado automaticamente pelo GitHub Actions."
+          }
+          Write-Host "Concluido: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"

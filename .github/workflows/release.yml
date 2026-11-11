@@ -1,0 +1,61 @@
+name: Release (backup)
+
+# Compila e anexa o EXE apenas se a release foi publicada sem ele.
+# O fluxo principal é o release.bat rodado localmente.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  attach-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Verificar se o EXE ja esta na release
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $assets = gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --json assets -q '.assets[].name' 2>$null
+          if ($assets -match "EnviarAssinaturas.exe") {
+            echo "has_exe=true" >> $env:GITHUB_OUTPUT
+            Write-Host "EXE ja esta na release, nada a fazer."
+          } else {
+            echo "has_exe=false" >> $env:GITHUB_OUTPUT
+            Write-Host "EXE nao encontrado, compilando..."
+          }
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.has_exe == 'false'
+
+      - name: Set up Python
+        if: steps.check.outputs.has_exe == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Gerar icone e instalar dependencias
+        if: steps.check.outputs.has_exe == 'false'
+        run: |
+          pip install -r requirements.txt -q
+          pip install -r requirements-build.txt -q
+          python create_icon.py
+
+      - name: Compilar executavel
+        if: steps.check.outputs.has_exe == 'false'
+        run: pyinstaller main.spec --noconfirm
+
+      - name: Calcular SHA-256 e anexar
+        if: steps.check.outputs.has_exe == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $hash = (Get-FileHash dist\EnviarAssinaturas.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  EnviarAssinaturas.exe" | Out-File -Encoding utf8 dist\EnviarAssinaturas.exe.sha256
+          gh release upload $env:GITHUB_REF_NAME dist\EnviarAssinaturas.exe dist\EnviarAssinaturas.exe.sha256 --repo $env:GITHUB_REPOSITORY
+          Write-Host "EXE anexado com sucesso."
