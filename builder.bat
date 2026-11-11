@@ -17,8 +17,8 @@ for /f "usebackq delims=" %%v in (`%PY% -c "import version; print(version.VERSIO
 echo Versao: %VERSION%
 echo.
 
-echo [1/4] Gerando icone...
-%PY% create_icon.py
+echo [1/4] Verificando icone...
+if not exist "logo_facto.ico" ( echo AVISO: logo_facto.ico nao encontrado )
 
 echo [2/4] Instalando dependencias de build...
 %PIP% install -r requirements-build.txt -q

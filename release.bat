@@ -50,11 +50,13 @@ echo Repositorio enviado.
 echo.
 
 :: ===================================================
-:: PASSO 2: Gerar icone
+:: PASSO 2: Verificar icone
 :: ===================================================
-echo [2/6] Gerando icone...
-%PY% create_icon.py
-if %ERRORLEVEL% neq 0 ( echo AVISO: nao foi possivel gerar logo.ico )
+echo [2/6] Verificando icone...
+if not exist "logo_facto.ico" (
+    echo ERRO: logo_facto.ico nao encontrado na pasta do projeto.
+    pause & exit /b 1
+)
 
 :: ===================================================
 :: PASSO 3: Instalar dependencias de build

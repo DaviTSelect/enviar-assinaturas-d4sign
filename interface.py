@@ -348,7 +348,7 @@ class Interface(QWidget):
         self._info_update: dict = {}
 
         self.setWindowTitle('Enviar Assinaturas D4Sign')
-        _logo = _base_dir / 'logo.ico'
+        _logo = _base_dir / 'logo_facto.ico'
         if _logo.is_file():
             self.setWindowIcon(QIcon(str(_logo)))
         self.resize(1180, 770)

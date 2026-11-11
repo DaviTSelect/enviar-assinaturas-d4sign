@@ -22,26 +22,34 @@ USUARIO = os.getenv("USUARIO")
 SENHA = os.getenv("SENHA")
 ID_CHECKBOX_ASSINATURAS = "checkboxFluxo"
 
-# Usuário atual do Windows
-user_profile = Path(os.environ["USERPROFILE"])
-
-# Caminhos relativos ao usuário atual
-chrome_driver = user_profile / os.getenv("CHROME_DRIVER")
-chrome_binary = user_profile / os.getenv("CHROME_BINARY")
 log_dir = Path(__file__).resolve().parent / "logs"
 log_dir.mkdir(exist_ok=True)
 
-service = Service(
-    str(chrome_driver),
-    log_output=str(log_dir / "chromedriver.log"),
-    service_args=["--verbose"],
-)
+
+def _criar_service():
+    user_profile = Path(os.environ["USERPROFILE"])
+    drv = os.getenv("CHROME_DRIVER")
+    bin_ = os.getenv("CHROME_BINARY")
+    if not drv or not bin_:
+        raise EnvironmentError(
+            "CHROME_DRIVER e CHROME_BINARY não encontrados no .env.\n"
+            f"Verifique se o arquivo .env está em: {_env_dir}"
+        )
+    return (
+        Service(
+            str(user_profile / drv),
+            log_output=str(log_dir / "chromedriver.log"),
+            service_args=["--verbose"],
+        ),
+        str(user_profile / bin_),
+    )
 
 
 class Navegador:
     def __init__(self, callback_cofres=None, headless=False):
+        service, chrome_binary = _criar_service()
         opts = Options()
-        opts.binary_location = str(chrome_binary)
+        opts.binary_location = chrome_binary
         if headless:
             opts.add_argument("--headless=new")
             opts.add_argument("--window-size=1366,768")
