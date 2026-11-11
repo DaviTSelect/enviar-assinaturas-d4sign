@@ -62,6 +62,7 @@ if not exist "logo.ico" (
 :: PASSO 3: Instalar dependencias de build
 :: ===================================================
 echo [3/6] Instalando dependencias de build...
+if exist "venv\Lib\site-packages\~ip" rmdir /s /q "venv\Lib\site-packages\~ip" 2>nul
 %PIP% install -r requirements-build.txt -q
 if %ERRORLEVEL% neq 0 ( echo ERRO ao instalar dependencias & pause & exit /b 1 )
 
