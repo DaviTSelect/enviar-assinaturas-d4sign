@@ -111,12 +111,12 @@ set NOTES_FILE=%TEMP%\release_notes_%VERSION%.md
     echo.
     echo 1. Baixe os 3 arquivos abaixo:
     echo    - **EnviarAssinaturas.exe** — o programa
-    echo    - **.env.example** — modelo de configuracao
+    echo    - **.env** — arquivo de configuracao ^(ja vem com o nome correto^)
     echo    - **planilha_exemplo.xlsx** — modelo da planilha de emails
     echo.
     echo 2. Crie uma pasta em qualquer lugar ^(ex: `C:\EnviarAssinaturas`^) e coloque os 3 arquivos la dentro.
     echo.
-    echo 3. Renomeie **.env.example** para **.env** e abra com o Bloco de Notas:
+    echo 3. Abra o arquivo **.env** com o Bloco de Notas e preencha:
     echo    - `USUARIO=` coloque seu email de login do D4Sign
     echo    - `SENHA=` coloque sua senha do D4Sign
     echo    - `EMAIL_DIRETOR=` coloque o email do diretor ^(sempre sera adicionado por ultimo^)
@@ -142,10 +142,13 @@ set NOTES_FILE=%TEMP%\release_notes_%VERSION%.md
     echo **SHA-256:** `%SHA256%`
 ) > "%NOTES_FILE%"
 
+:: Copia .env.example como .env para upload (GitHub exibe dotfiles como default.*)
+copy /Y .env.example dist\.env > nul
+
 gh release create %TAG% ^
     "dist\EnviarAssinaturas.exe" ^
     "dist\EnviarAssinaturas.exe.sha256" ^
-    ".env.example" ^
+    "dist\.env" ^
     "planilha_exemplo.xlsx" ^
     --title "Enviar Assinaturas D4Sign %TAG%" ^
     --notes-file "%NOTES_FILE%"
