@@ -8,13 +8,11 @@ echo ============================================
 :: Detectar Python / venv
 if exist "venv\Scripts\python.exe" (
     set PY=venv\Scripts\python.exe
-    set PIP=venv\Scripts\pip.exe
-    set PYINST=venv\Scripts\pyinstaller.exe
 ) else (
     set PY=python
-    set PIP=pip
-    set PYINST=pyinstaller
 )
+set PIP=%PY% -m pip
+set PYINST=%PY% -m PyInstaller
 
 :: Ler versao do version.py
 for /f "usebackq delims=" %%v in (`%PY% -c "import version; print(version.VERSION)"`) do set VERSION=%%v
