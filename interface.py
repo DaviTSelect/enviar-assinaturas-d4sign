@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
 from navegador import Navegador
 from version import VERSION
 
-LOG_DIR = Path(__file__).resolve().parent / "logs"
+_base_log = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+LOG_DIR = _base_log / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 ERROR_LOG = LOG_DIR / "automation.log"
 logging.basicConfig(

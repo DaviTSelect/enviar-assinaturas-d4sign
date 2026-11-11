@@ -1,7 +1,6 @@
 ﻿import os
 import time
 from pathlib import Path
-
 import sys
 
 from dotenv import load_dotenv
@@ -14,7 +13,8 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
 from selenium.common.exceptions import TimeoutException
-# Carrega .env da pasta do executável (ou do script durante desenvolvimento)
+
+# Base sempre ao lado do .exe (ou do script em dev)
 _env_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 load_dotenv(_env_dir / ".env")
 
@@ -22,25 +22,43 @@ USUARIO = os.getenv("USUARIO")
 SENHA = os.getenv("SENHA")
 ID_CHECKBOX_ASSINATURAS = "checkboxFluxo"
 
-log_dir = Path(__file__).resolve().parent / "logs"
+# Logs persistentes ao lado do executável, não dentro do _MEI temp dir
+log_dir = _env_dir / "logs"
 log_dir.mkdir(exist_ok=True)
-
 
 _CHROME_DRIVER_DEFAULT = Path("Chrome") / "chromedriver.exe"
 _CHROME_BINARY_DEFAULT = Path("Chrome") / "GoogleChrome" / "App" / "Chrome-bin" / "chrome.exe"
+
+# Perfil Chrome dedicado à automação (evita conflito com Chrome do usuário aberto)
+_CHROME_PROFILE_DIR = _env_dir / "chrome_profile"
 
 
 def _criar_service():
     user_profile = Path(os.environ["USERPROFILE"])
     drv = Path(os.getenv("CHROME_DRIVER") or _CHROME_DRIVER_DEFAULT)
     bin_ = Path(os.getenv("CHROME_BINARY") or _CHROME_BINARY_DEFAULT)
+
+    drv_path = user_profile / drv
+    bin_path = user_profile / bin_
+
+    if not drv_path.is_file():
+        raise FileNotFoundError(
+            f"ChromeDriver não encontrado em:\n{drv_path}\n\n"
+            "Verifique se o arquivo .env está correto e o ChromeDriver está instalado."
+        )
+    if not bin_path.is_file():
+        raise FileNotFoundError(
+            f"Chrome não encontrado em:\n{bin_path}\n\n"
+            "Verifique se o arquivo .env está correto e o Chrome está instalado."
+        )
+
     return (
         Service(
-            str(user_profile / drv),
+            str(drv_path),
             log_output=str(log_dir / "chromedriver.log"),
             service_args=["--verbose"],
         ),
-        str(user_profile / bin_),
+        str(bin_path),
     )
 
 
@@ -49,11 +67,21 @@ class Navegador:
         service, chrome_binary = _criar_service()
         opts = Options()
         opts.binary_location = chrome_binary
+
+        # Argumentos críticos de estabilidade para automação — previnem GetHandleVerifier crash
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--remote-debugging-port=0")  # porta livre aleatória, evita conflito
+        opts.add_argument("--disable-background-networking")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument(f"--user-data-dir={_CHROME_PROFILE_DIR}")  # perfil isolado, sem conflito
+
         if headless:
             opts.add_argument("--headless=new")
             opts.add_argument("--window-size=1366,768")
         else:
             opts.add_argument("--start-maximized")
+
         self.driver = webdriver.Chrome(service=service, options=opts)
         self.url = 'https://secure.d4sign.com.br/desk.html'
         self.status_login = False
@@ -69,17 +97,37 @@ class Navegador:
 
 
     def realizar_login(self):
+        if not USUARIO or not SENHA:
+            self.driver.quit()
+            raise ValueError(
+                "USUARIO e/ou SENHA não configurados no arquivo .env.\n"
+                f"Verifique o arquivo: {_env_dir / '.env'}"
+            )
         self.driver.get(self.url)
-        #email
         campo_email = self.wait.until(EC.element_to_be_clickable((By.ID, "Email")))
         campo_email.send_keys(USUARIO)
-        #senha
         campo_senha = self.wait.until(EC.element_to_be_clickable((By.ID, "Passwd")))
         campo_senha.send_keys(SENHA)
-        #entrar
         campo_entrar = self.wait.until(EC.element_to_be_clickable((By.ID, "logar")))
         campo_entrar.click()
-        campo_site = self.wait.until(EC.element_to_be_clickable((By.ID, "drop-zone")))
+
+        # Aguarda sucesso (drop-zone) ou falha de credencial (alert-danger)
+        def _resultado_login(driver):
+            if driver.find_elements(By.CSS_SELECTOR, ".alert.alert-danger"):
+                return "credencial_invalida"
+            if driver.find_elements(By.ID, "drop-zone"):
+                return "ok"
+            return False
+
+        resultado = WebDriverWait(self.driver, 15).until(_resultado_login)
+
+        if resultado == "credencial_invalida":
+            self.driver.quit()
+            raise ValueError(
+                "E-mail ou senha inválida.\n\n"
+                f"Corrija as credenciais no arquivo .env em:\n{_env_dir / '.env'}"
+            )
+
         self.status_login = True
         print("Login realizado com sucesso!")
 

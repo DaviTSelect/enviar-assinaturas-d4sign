@@ -7,6 +7,7 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
+        'pyexpat',
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtWidgets',
