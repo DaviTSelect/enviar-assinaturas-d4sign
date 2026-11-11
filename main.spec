@@ -1,11 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas_sel, binaries_sel, hiddenimports_sel = collect_all('selenium')
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['PySide6.QtSvg', 'PySide6.QtXml'],
+    binaries=binaries_sel,
+    datas=datas_sel,
+    hiddenimports=['PySide6.QtSvg', 'PySide6.QtXml'] + hiddenimports_sel,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

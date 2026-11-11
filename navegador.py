@@ -26,15 +26,14 @@ log_dir = Path(__file__).resolve().parent / "logs"
 log_dir.mkdir(exist_ok=True)
 
 
+_CHROME_DRIVER_DEFAULT = Path("Chrome") / "chromedriver.exe"
+_CHROME_BINARY_DEFAULT = Path("Chrome") / "GoogleChrome" / "App" / "Chrome-bin" / "chrome.exe"
+
+
 def _criar_service():
     user_profile = Path(os.environ["USERPROFILE"])
-    drv = os.getenv("CHROME_DRIVER")
-    bin_ = os.getenv("CHROME_BINARY")
-    if not drv or not bin_:
-        raise EnvironmentError(
-            "CHROME_DRIVER e CHROME_BINARY não encontrados no .env.\n"
-            f"Verifique se o arquivo .env está em: {_env_dir}"
-        )
+    drv = Path(os.getenv("CHROME_DRIVER") or _CHROME_DRIVER_DEFAULT)
+    bin_ = Path(os.getenv("CHROME_BINARY") or _CHROME_BINARY_DEFAULT)
     return (
         Service(
             str(user_profile / drv),
@@ -53,6 +52,8 @@ class Navegador:
         if headless:
             opts.add_argument("--headless=new")
             opts.add_argument("--window-size=1366,768")
+        else:
+            opts.add_argument("--start-maximized")
         self.driver = webdriver.Chrome(service=service, options=opts)
         self.url = 'https://secure.d4sign.com.br/desk.html'
         self.status_login = False
