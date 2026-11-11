@@ -330,6 +330,7 @@ class Interface(QWidget):
     sinal_automacao_ok      = Signal(int, int, int)   # total, sucesso, erros
     sinal_automacao_falhou  = Signal(str)
     _sinal_update           = Signal(str, str)        # texto, cor
+    _sinal_update_concluido = Signal()
 
     def __init__(self):
         self._app = QApplication.instance() or QApplication(sys.argv)
@@ -344,6 +345,7 @@ class Interface(QWidget):
         self.automacao_em_andamento = False
         self._linhas_duplicadas: list = []
         self._cabecalhos_planilha: list = []
+        self._info_update: dict = {}
 
         self.setWindowTitle('Enviar Assinaturas D4Sign')
         _logo = _base_dir / 'logo.ico'
@@ -371,6 +373,7 @@ class Interface(QWidget):
         self.sinal_automacao_ok.connect(self._ao_concluir_automacao)
         self.sinal_automacao_falhou.connect(self._ao_falhar_automacao)
         self._sinal_update.connect(self._ao_status_update)
+        self._sinal_update_concluido.connect(self._ao_update_concluido)
 
         self._atualizar_estado()
         self.show()
@@ -608,11 +611,14 @@ class Interface(QWidget):
             _rotulo('Automação D4Sign — Envio de Documentos para Assinatura Digital', 9, '#83919c')
         )
         bot.addStretch()
-        self._lbl_update = QLabel('')
-        self._lbl_update.setStyleSheet(
-            'color:#83919c; font-family:"Segoe UI"; font-size:9px;'
+        self._btn_update = QPushButton('')
+        self._btn_update.setFlat(True)
+        self._btn_update.setStyleSheet(
+            'QPushButton { color:#83919c; font-family:"Segoe UI"; font-size:9px;'
+            ' border:none; padding:0; background:transparent; }'
         )
-        bot.addWidget(self._lbl_update)
+        self._btn_update.clicked.connect(self._iniciar_atualizacao)
+        bot.addWidget(self._btn_update)
         root.addLayout(bot)
 
     # ── Estado da UI ──────────────────────────────────────────────────────────
@@ -1031,18 +1037,70 @@ class Interface(QWidget):
             from updater import verificar_atualizacao
             resultado = verificar_atualizacao()
             if resultado.get("versao_mais_nova") or resultado.get("disponivel"):
+                self._info_update = resultado
                 v = resultado.get("versao_nova", "")
-                self._sinal_update.emit(f'● Nova versão {v} disponível', '#e9a833')
+                self._sinal_update.emit(f'● Nova versão {v} — clique para atualizar', '#e9a833')
             else:
                 self._sinal_update.emit(f'● v{VERSION} — atualizado', '#5aaa7a')
         except Exception:
             self._sinal_update.emit(f'v{VERSION}', '#83919c')
 
     def _ao_status_update(self, texto: str, cor: str):
-        self._lbl_update.setText(texto)
-        self._lbl_update.setStyleSheet(
-            f'color:{cor}; font-family:"Segoe UI"; font-size:9px;'
+        tem_update = bool(self._info_update)
+        self._btn_update.setText(texto)
+        underline = 'text-decoration:underline;' if tem_update else ''
+        cursor = Qt.PointingHandCursor if tem_update else Qt.ArrowCursor
+        self._btn_update.setCursor(cursor)
+        self._btn_update.setStyleSheet(
+            f'QPushButton {{ color:{cor}; font-family:"Segoe UI"; font-size:9px;'
+            f' border:none; padding:0; background:transparent; {underline} }}'
         )
+
+    def _iniciar_atualizacao(self):
+        if not self._info_update:
+            return
+        url      = self._info_update.get("url_download", "")
+        versao   = self._info_update.get("versao_nova", "")
+        if not url:
+            _dialogo(self, 'Atualização disponível',
+                     f'Nova versão {versao} disponível!\n'
+                     'Baixe manualmente em:\ngithub.com/DaviTSelect/enviar-assinaturas-d4sign/releases/latest',
+                     QMessageBox.Information)
+            return
+        resp = _dialogo(self, 'Atualizar agora?',
+                        f'Nova versão {versao} disponível!\n\n'
+                        'O programa vai baixar a atualização, fechar e reabrir automaticamente.\n\nContinuar?',
+                        QMessageBox.Question, QMessageBox.Yes | QMessageBox.No)
+        if resp != QMessageBox.Yes:
+            return
+        self._btn_update.setEnabled(False)
+        self._sinal_update.emit('⬇ Baixando atualização...', '#2563a8')
+        threading.Thread(target=self._baixar_e_aplicar, daemon=True).start()
+
+    def _baixar_e_aplicar(self):
+        try:
+            from updater import aplicar_atualizacao
+            def _progresso(baixados, total):
+                if total > 0:
+                    pct = int(baixados * 100 / total)
+                    mb  = baixados / 1_048_576
+                    self._sinal_update.emit(f'⬇ {pct}% ({mb:.1f} MB)...', '#2563a8')
+            aplicar_atualizacao(
+                self._info_update["url_download"],
+                self._info_update["versao_nova"],
+                _progresso,
+            )
+            self._sinal_update_concluido.emit()
+        except Exception as e:
+            logger.exception("Falha ao baixar/aplicar atualização")
+            self._sinal_update.emit(f'● Erro ao atualizar: clique para tentar novamente', '#c0351a')
+            self._btn_update.setEnabled(True)
+
+    def _ao_update_concluido(self):
+        _dialogo(self, 'Atualização pronta',
+                 'Download concluído!\n\nO programa será fechado e a nova versão abrirá automaticamente.',
+                 QMessageBox.Information)
+        self.close()
 
     def closeEvent(self, event):
         if self.automacao_em_andamento:
