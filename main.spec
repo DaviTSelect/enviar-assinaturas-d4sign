@@ -1,10 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
+
+# Windows Store Python instala DLLs em Program Files\WindowsApps\ (virtualizado).
+# O PyInstaller não as coleta automaticamente; localizamos o diretório real via glob.
+import glob, sys
+_ver = f"{sys.version_info.major}{sys.version_info.minor}"
+_base_dir = Path(sys._base_executable).parent
+if not (_base_dir / f'python{_ver}.dll').exists():
+    _wa = sorted(glob.glob(
+        f"C:/Program Files/WindowsApps/PythonSoftwareFoundation.Python."
+        f"{sys.version_info.major}.{sys.version_info.minor}_*"
+    ), reverse=True)
+    _base_dir = next((Path(d) for d in _wa if (Path(d) / f'python{_ver}.dll').exists()), _base_dir)
+_dll_names = [f'python{_ver}.dll', 'python3.DLL', 'VCRUNTIME140.dll', 'vcruntime140_1.dll']
+_extra_binaries = [(str(_base_dir / d), '.') for d in _dll_names if (_base_dir / d).exists()]
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=_extra_binaries,
     datas=[],
     hiddenimports=[
         'pyexpat',
