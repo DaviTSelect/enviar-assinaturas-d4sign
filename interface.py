@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -10,22 +12,26 @@ import unicodedata
 from pathlib import Path
 
 from openpyxl import load_workbook
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
+    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFrame,
     QGraphicsDropShadowEffect, QHBoxLayout, QHeaderView, QLabel,
     QMessageBox, QPushButton, QScrollArea, QTableWidget,
-    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QTableWidgetItem, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from navegador import Navegador
+import processos
+from diario import Diario, assinatura
+from navegador import Navegador, encerrar_automacao
 from version import VERSION
 
 _base_log = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 LOG_DIR = _base_log / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 ERROR_LOG = LOG_DIR / "automation.log"
+ARQUIVO_DIARIO = LOG_DIR / "envio_em_andamento.jsonl"
+ARQUIVO_TRAVA = LOG_DIR / "instancia.lock"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
@@ -326,6 +332,7 @@ _base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Pa
 
 class Interface(QWidget):
     sinal_cofres_carregados = Signal(list)
+    sinal_pasta_expandida   = Signal(str, str)        # chave, mensagem de erro
     sinal_doc_enviando      = Signal(int)
     sinal_doc_enviado       = Signal(int)
     sinal_doc_falhou        = Signal(int, str)
@@ -342,10 +349,18 @@ class Interface(QWidget):
         self.planilha_path        = ''
         self.pasta_documentos     = ''
         self.documentos: list[dict] = []
-        self.lista_cofres: list[dict] = []
+        self.lista_cofres: list = []
+        self._destinos: dict = {}          # chave -> catalogo.Destino
+        self._itens_pasta: dict = {}       # chave -> QTreeWidgetItem
+        self._expandindo = False
+        self._lote: dict | None = None     # envio em andamento
+        self._lock_planilha = threading.Lock()
+        self.diario = Diario(ARQUIVO_DIARIO)
+        self._novo_exe: str | None = None  # atualização baixada, aguardando
         self.navegador: Navegador | None = None
         self.automacao_em_andamento = False
         self._linhas_duplicadas: list = []
+        self._linhas_conferir: list = []
         self._cabecalhos_planilha: list = []
         self._info_update: dict = {}
 
@@ -369,6 +384,7 @@ class Interface(QWidget):
         self._montar_rodape(root)
 
         self.sinal_cofres_carregados.connect(self._cofres_carregados)
+        self.sinal_pasta_expandida.connect(self._ao_expandir_pasta)
         self.sinal_doc_enviando.connect(lambda r: self.tabela_widget.atualizar_status(r, ST_ENVIANDO))
         self.sinal_doc_enviado.connect(lambda r: self.tabela_widget.atualizar_status(r, ST_ENVIADO))
         self.sinal_doc_falhou.connect(lambda r, _msg: self.tabela_widget.atualizar_status(r, ST_ERRO))
@@ -379,6 +395,7 @@ class Interface(QWidget):
 
         self._atualizar_estado()
         self.showMaximized()
+        QTimer.singleShot(0, self._recuperar_envio_interrompido)
         threading.Thread(target=self._verificar_atualizacoes_bg, daemon=True).start()
         sys.exit(self._app.exec())
 
@@ -502,7 +519,7 @@ class Interface(QWidget):
 
         self.row_planilha = SelectionRow(
             '02', 'Planilha de signatários',
-            'Planilha .xlsx com colunas: nome, email (ou email1, email2...).',
+            'Planilha .xlsx com colunas: nome, email_favorecido, email_coordenador.',
             'Selecionar planilha', 'file', self.selecionar_planilha,
         )
         cly.addWidget(self.row_planilha)
@@ -547,17 +564,21 @@ class Interface(QWidget):
         clay = QVBoxLayout(self.cofres_frame)
         clay.setContentsMargins(16, 12, 16, 16)
         clay.setSpacing(8)
-        clay.addWidget(_rotulo('Cofre para envio', 10, BG, QFont.DemiBold))
-        self.cofre_combo = QComboBox()
-        self.cofre_combo.setStyleSheet('''
-            QComboBox {background:#ffffff; border:1px solid #dde1df; border-radius:8px;
-                font-family:"Segoe UI"; font-size:11px; color:#344a5b;
-                padding:6px 12px; min-height:34px;}
-            QComboBox::drop-down {border:none; padding-right:8px;}
-            QComboBox QAbstractItemView {background:#ffffff; border:1px solid #dde1df;
-                font-family:"Segoe UI"; font-size:11px; color:#344a5b;}
+        clay.addWidget(_rotulo('Cofre ou subpasta de destino', 10, BG, QFont.DemiBold))
+        self.cofre_tree = QTreeWidget()
+        self.cofre_tree.setHeaderHidden(True)
+        self.cofre_tree.setMinimumHeight(220)
+        self.cofre_tree.setStyleSheet('''
+            QTreeWidget {background:#ffffff; border:1px solid #dde1df; border-radius:8px;
+                font-family:"Segoe UI"; font-size:11px; color:#344a5b; padding:4px;}
+            QTreeWidget::item {padding:4px 2px;}
+            QTreeWidget::item:selected {background:#e5f4ed; color:#1d5e3a;}
         ''')
-        clay.addWidget(self.cofre_combo)
+        self.cofre_tree.itemExpanded.connect(self._expandir_pasta)
+        self.cofre_tree.currentItemChanged.connect(lambda *_: self._mostrar_destino())
+        clay.addWidget(self.cofre_tree)
+        self.destino_label = _rotulo('', 10, COR_SELECIONADO, QFont.DemiBold, True)
+        clay.addWidget(self.destino_label)
         self.continuar_btn = QPushButton('Continuar automação  →')
         self.continuar_btn.setFixedHeight(42)
         self.continuar_btn.setCursor(Qt.PointingHandCursor)
@@ -718,6 +739,18 @@ class Interface(QWidget):
         except Exception as erro:
             _dialogo(self, 'Planilha inválida', str(erro), QMessageBox.Critical)
             return
+        if self._linhas_conferir:
+            resposta = _dialogo(
+                self, 'Conferir antes de reenviar',
+                f'{len(self._linhas_conferir)} linha(s) podem já estar no D4Sign:\n'
+                + '\n'.join(self._linhas_conferir[:15])
+                + ('\n...' if len(self._linhas_conferir) > 15 else '')
+                + '\n\nVocê já conferiu e quer enviar essas linhas mesmo assim?',
+                QMessageBox.Warning, QMessageBox.Yes | QMessageBox.No,
+            )
+            if resposta != QMessageBox.Yes:
+                self.documentos = []
+                return
         if self._linhas_duplicadas:
             n = len(self._linhas_duplicadas)
             nomes_dup = ", ".join(sorted({l["nome"] for l in self._linhas_duplicadas}))
@@ -771,8 +804,8 @@ class Interface(QWidget):
         indice_nome = indices.get("nome")
         if not indices_email or indice_nome is None:
             raise ValueError(
-                "A planilha deve ter uma coluna 'nome' "
-                "e ao menos uma coluna 'email', 'email1', 'email2' etc."
+                "A planilha deve ter a coluna 'nome' e ao menos uma coluna de e-mail: "
+                "'email_favorecido' e 'email_coordenador'."
             )
         arquivos = [
             arq for arq in Path(pasta_documentos).iterdir()
@@ -799,6 +832,13 @@ class Interface(QWidget):
                 "valores": tuple(valores),
             })
         workbook.close()
+
+        indice_status = indices.get("status")
+        self._linhas_conferir = [
+            l["nome"] for l in todas_linhas
+            if indice_status is not None and indice_status < len(l["valores"])
+            and "conferir" in str(l["valores"][indice_status] or "").casefold()
+        ]
 
         # Detectar nomes duplicados
         contagem: dict[str, int] = {}
@@ -856,90 +896,281 @@ class Interface(QWidget):
     def iniciar_automacao(self):
         if self.automacao_em_andamento:
             return
+        if self._expandindo:
+            return
         self.automacao_em_andamento = True
         self._atualizar_estado()
         threading.Thread(target=self._executar_inicio, daemon=True).start()
 
     def _executar_inicio(self):
         try:
-            self.navegador = Navegador(self.mostrar_cofres, headless=self.chk_oculto.isChecked())
-            if not self.navegador.status_login:
-                self.navegador.realizar_login()
-            self.navegador.abrir_tela_envio()
-            self.navegador.carregar_cofres()
-        except Exception as erro:
-            logger.exception("Falha durante a inicialização e leitura dos cofres")
-            self.sinal_automacao_falhou.emit(str(erro))
-        finally:
+            if not processos.travar_instancia(ARQUIVO_TRAVA):
+                raise RuntimeError("O programa já está aberto em outra janela. Feche-a antes de continuar.")
+            # Uma segunda execução precisa liberar o perfil do Chrome anterior
+            if self.navegador:
+                self.navegador.fechar()
+                self.navegador = None
+            self.navegador = Navegador(headless=self.chk_oculto.isChecked())
+            self.navegador.realizar_login()
+            cofres = self.navegador.carregar_cofres()
             self.automacao_em_andamento = False
+            self.mostrar_cofres(cofres)
+        except Exception as erro:
+            if processos.encerrando.is_set():
+                return
+            logger.exception("Falha durante a inicialização e leitura dos cofres")
+            self.automacao_em_andamento = False
+            self.sinal_automacao_falhou.emit(str(erro))
 
     def mostrar_cofres(self, cofres):
         self.sinal_cofres_carregados.emit(cofres)
 
-    def _cofres_carregados(self, cofres: list[dict]):
+    def _cofres_carregados(self, cofres: list):
         self.lista_cofres = cofres
-        self.cofre_combo.clear()
+        self._destinos, self._itens_pasta = {}, {}
+        self.cofre_tree.clear()
         for cofre in cofres:
-            self.cofre_combo.addItem(cofre["texto"], cofre["valor"])
+            self._adicionar_no(self.cofre_tree.invisibleRootItem(), cofre)
+        self.cofre_tree.setEnabled(True)
+        self._mostrar_destino()
+        self._atualizar_estado()  # tira o botão principal do "Iniciando..."
+        self.continuar_btn.setEnabled(True)
+        self.continuar_btn.setStyleSheet(ESTILO_INICIAR_ATIVO)
         self.cofres_frame.show()
         self.div_cofres.show()
         self.ready_title.setText(f'{len(cofres)} cofre(s) disponível(is)')
-        self.ready_hint.setText('Selecione o cofre e clique em Continuar automação.')
+        self.ready_hint.setText('Selecione o cofre ou a subpasta e clique em Continuar automação.')
+
+    # ── Árvore de cofres e subpastas ──────────────────────────────────────────
+
+    def _adicionar_no(self, item_pai, destino):
+        item = QTreeWidgetItem(item_pai, [destino.nome])
+        item.setData(0, Qt.UserRole, destino.chave)
+        item.setToolTip(0, destino.caminho)
+        self._destinos[destino.chave] = destino
+        self._itens_pasta[destino.chave] = item
+        self._preencher_filhos(item, destino)
+
+    def _preencher_filhos(self, item, destino):
+        for filho in sorted(destino.filhos, key=lambda f: f.nome.casefold()):
+            if filho.chave not in self._destinos:
+                self._adicionar_no(item, filho)
+        if destino.expansivel and not destino.carregado and not item.childCount():
+            marcador = QTreeWidgetItem(item, ['Carregando...'])
+            marcador.setFlags(Qt.NoItemFlags)
+
+    def _destino_selecionado(self):
+        item = self.cofre_tree.currentItem()
+        return self._destinos.get(item.data(0, Qt.UserRole)) if item else None
+
+    def _mostrar_destino(self):
+        destino = self._destino_selecionado()
+        self.destino_label.setText(
+            f'Destino: {destino.caminho}' if destino else 'Nenhum destino selecionado'
+        )
+
+    def _expandir_pasta(self, item):
+        destino = self._destinos.get(item.data(0, Qt.UserRole))
+        if not destino or destino.carregado:
+            return
+        if self._expandindo or self.automacao_em_andamento:
+            item.setExpanded(False)  # o navegador atende um pedido por vez
+            return
+        self._expandindo = True
+        self.continuar_btn.setEnabled(False)
+
+        def carregar():
+            erro = ''
+            try:
+                self.navegador.expandir_pasta(destino)
+            except Exception as e:
+                logger.exception("Falha ao carregar subpastas")
+                erro = str(e) or type(e).__name__
+            if not processos.encerrando.is_set():
+                self.sinal_pasta_expandida.emit(destino.chave, erro)
+
+        threading.Thread(target=carregar, daemon=True).start()
+
+    def _ao_expandir_pasta(self, chave: str, erro: str):
+        self._expandindo = False
+        self.continuar_btn.setEnabled(True)
+        item, destino = self._itens_pasta.get(chave), self._destinos.get(chave)
+        if not item or not destino:
+            return
+        if erro:
+            item.setExpanded(False)
+            _dialogo(self, 'Subpastas indisponíveis',
+                     f'Não foi possível carregar as subpastas de "{destino.nome}".\n{erro}',
+                     QMessageBox.Warning)
+            return
+        for i in reversed(range(item.childCount())):
+            if item.child(i).data(0, Qt.UserRole) is None:
+                item.removeChild(item.child(i))
+        self._preencher_filhos(item, destino)
 
     # ── Automação — fase 2: envio dos documentos ──────────────────────────────
 
     def continuar_automacao(self):
-        if self.automacao_em_andamento or not self.lista_cofres:
+        if self.automacao_em_andamento or self._expandindo or not self.lista_cofres:
             return
-        idx = self.cofre_combo.currentIndex()
-        if idx < 0:
-            _dialogo(self, 'Cofre inválido', 'Selecione um cofre disponível.', QMessageBox.Warning)
+        destino = self._destino_selecionado()
+        if not destino:
+            _dialogo(self, 'Destino inválido', 'Selecione um cofre ou uma subpasta.', QMessageBox.Warning)
             return
         texto = self.mensagem_texto.toPlainText().strip()
         if not texto:
             _dialogo(self, 'Mensagem obrigatória',
                      'Digite o texto da mensagem para assinatura.', QMessageBox.Warning)
             return
-        cofre = self.lista_cofres[idx]
         self.automacao_em_andamento = True
+        self.cofre_tree.setEnabled(False)
         self.continuar_btn.setEnabled(False)
         self.continuar_btn.setStyleSheet(ESTILO_INICIAR_RODANDO)
         threading.Thread(
             target=self._enviar_arquivos,
-            args=(cofre, list(self.documentos), texto),
+            args=(destino, list(self.documentos), texto),
             daemon=True,
         ).start()
 
-    def _enviar_arquivos(self, cofre, documentos, texto):
+    def _enviar_arquivos(self, destino, documentos, texto):
         erros: dict[int, str] = {}
         avisos: dict[int, str] = {}
+        lote = {"erros": erros, "avisos": avisos, "enviados": set(), "atual": None,
+                "total": len(documentos), "gravado": False}
+        self._lote = lote
+        try:
+            self.diario.iniciar(self.planilha_path, documentos, self._linhas_duplicadas)
+        except Exception as erro:
+            logger.exception("Não foi possível criar o diário do envio")
+            self._lote = None
+            self.automacao_em_andamento = False
+            self.sinal_automacao_falhou.emit(f"Nada foi enviado: não foi possível gravar o registro do envio. {erro}")
+            return
         for i, doc in enumerate(documentos):
+            if processos.encerrando.is_set():
+                return  # o fechamento grava a planilha
+            lote["atual"] = i
             self.sinal_doc_enviando.emit(i)
-            etapa = ""
+            etapa = "Não enviado (falha ao abrir a tela de envio): "
             try:
-                # Volta à tela de envio antes do próximo, para que uma falha aqui
+                # Abre o destino antes de cada documento, para que uma falha aqui
                 # não seja atribuída a um documento já enviado
-                if i > 0:
-                    etapa = "Não enviado (falha ao voltar para a tela de envio): "
-                    self.navegador.voltar_para_envio()
-                    etapa = ""
-                self.navegador.selecionar_cofre(cofre["valor"])
+                self.navegador.voltar_para_envio(destino)
+                etapa = ""
+                self.diario.marcar(i, "enviando")  # antes do passo irreversível
                 self.navegador.upload_documento(str(Path(doc["nome_arquivo"])))
+                etapa = "Arquivo já subiu, conferir no D4Sign antes de reenviar: "
                 self.navegador.adicionar_emails(doc["emails"])
                 if not self.navegador.envio_para_assinatura(texto):
                     avisos[i] = "Enviado - sem confirmação do D4Sign, conferir no cofre"
+                lote["enviados"].add(i)
+                self._anotar(i, "enviado", avisos.get(i, ""))
                 self.sinal_doc_enviado.emit(i)
             except Exception as erro:
+                if processos.encerrando.is_set():
+                    return
                 logger.exception(f"Falha no documento [{i}] {doc.get('nome', '')}")
                 msg_erro = etapa + str(erro)
                 erros[i] = msg_erro
+                self._anotar(i, "erro", msg_erro)
                 self.sinal_doc_falhou.emit(i, msg_erro)
 
+        with self._lock_planilha:
+            if processos.encerrando.is_set() or lote["gravado"]:
+                return
+            lote["gravado"] = True
+            self._gravar_resultado(erros, avisos)
+
+        self.automacao_em_andamento = False
+        sucesso = len(documentos) - len(erros)
+        self.sinal_automacao_ok.emit(len(documentos), sucesso, len(erros))
+
+    def _anotar(self, indice, estado, mensagem):
+        """Registro posterior ao envio: uma falha aqui não pode mudar o resultado."""
+        try:
+            self.diario.marcar(indice, estado, mensagem)
+        except Exception:
+            logger.exception("Falha ao registrar o documento no diário")
+
+    def _recuperar_envio_interrompido(self):
+        """Aplica na planilha um envio que terminou sem salvar (queda, processo morto)."""
+        if not processos.travar_instancia(ARQUIVO_TRAVA):
+            return  # outra janela está enviando: o diário é dela
+        try:
+            dados = self.diario.ler()
+            if not dados:
+                return
+            cabecalho, estados = dados
+            erros, avisos = {}, {}
+            for i in range(len(cabecalho["documentos"])):
+                registro = estados.get(i, {})
+                estado = registro.get("estado")
+                if estado == "enviado":
+                    if registro["mensagem"]:
+                        avisos[i] = registro["mensagem"]
+                elif estado == "erro":
+                    erros[i] = registro["mensagem"]
+                elif estado == "enviando":
+                    erros[i] = "Interrompido durante o envio - conferir no D4Sign antes de reenviar"
+                else:
+                    erros[i] = "Não enviado - automação interrompida"
+
+            planilha = Path(cabecalho["planilha"])
+            if assinatura(planilha) != cabecalho["assinatura"]:
+                # Editada depois da queda: preserva a edição e trabalha numa cópia
+                copia = planilha.with_name(f"{planilha.stem}_recuperado_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+                shutil.copy2(planilha, copia)
+                planilha = copia
+            self.planilha_path = str(planilha)
+            self.documentos = cabecalho["documentos"]
+            self._linhas_duplicadas = cabecalho["duplicadas"]
+            destino = self._atualizar_planilha_resultado(erros, avisos)
+            self.diario.concluir()
+            _dialogo(
+                self, 'Envio anterior recuperado',
+                f'O último envio foi interrompido. {len(cabecalho["documentos"]) - len(erros)} '
+                f'documento(s) enviado(s) e {len(erros)} pendente(s) foram registrados em:\n{destino}'
+                '\n\nConfira no D4Sign as linhas marcadas "conferir" antes de reenviar.',
+                QMessageBox.Warning,
+            )
+        except Exception:
+            logger.exception("Falha ao recuperar o envio interrompido")
+            guardado = self.diario.arquivar() if self.diario.caminho.exists() else ERROR_LOG
+            _dialogo(
+                self, 'Envio anterior não recuperado',
+                'O último envio foi interrompido e não foi possível atualizar a planilha. '
+                f'Confira no D4Sign antes de reenviar.\nRegistro: {guardado}',
+                QMessageBox.Critical,
+            )
+        finally:
+            self.planilha_path, self.documentos, self._linhas_duplicadas = '', [], []
+
+    def _interromper_lote(self):
+        """Ao fechar durante o envio, registra na planilha o que já saiu e o que falta."""
+        with self._lock_planilha:
+            lote = self._lote
+            if not lote or lote["gravado"]:
+                return
+            erros = dict(lote["erros"])
+            for i in range(lote["total"]):
+                if i in lote["enviados"] or i in erros:
+                    continue
+                erros[i] = (
+                    "Interrompido durante o envio - conferir no D4Sign antes de reenviar"
+                    if i == lote["atual"] else "Não enviado - automação encerrada"
+                )
+            lote["gravado"] = True
+            self._gravar_resultado(erros, dict(lote["avisos"]))
+
+    def _gravar_resultado(self, erros, avisos):
         self._avisos_envio = len(avisos)
         self._aviso_planilha = ""
         try:
             destino = self._atualizar_planilha_resultado(erros, avisos)
+            self.diario.concluir()
             if Path(destino) != Path(self.planilha_path):
+                original, self.planilha_path = self.planilha_path, str(destino)
+                logger.warning("Planilha %s bloqueada; resultado em %s", original, destino)
                 self._aviso_planilha = (
                     "A planilha original estava aberta ou bloqueada e NÃO foi alterada. "
                     f"O resultado foi salvo em:\n{destino}\nUse este arquivo daqui em diante."
@@ -951,16 +1182,14 @@ class Interface(QWidget):
                 f"conferir no D4Sign. Log: {ERROR_LOG}"
             )
 
-        self.automacao_em_andamento = False
-        sucesso = len(documentos) - len(erros)
-        self.sinal_automacao_ok.emit(len(documentos), sucesso, len(erros))
-
     def _ao_concluir_automacao(self, total: int, sucesso: int, num_erros: int):
         self.continuar_btn.setEnabled(True)
         self.continuar_btn.setStyleSheet(ESTILO_INICIAR_ATIVO)
+        self.cofre_tree.setEnabled(True)
+        destino = self._destino_selecionado()
         partes = [
             f'{sucesso} de {total} documento(s) enviado(s) para assinatura'
-            f' no cofre "{self.cofre_combo.currentText()}".'
+            f' em "{destino.caminho if destino else ""}".'
         ]
         if num_erros:
             partes.append(
@@ -980,7 +1209,12 @@ class Interface(QWidget):
             partes.append(self._aviso_planilha)
         alerta = num_erros or n_dup or self._avisos_envio or self._aviso_planilha
         icon = QMessageBox.Warning if alerta else QMessageBox.Information
+        # Descarta o lote: reenviar exige confirmar a planilha de novo
+        self._lote = None
+        self.row_planilha.definir_valor(Path(self.planilha_path).name)
+        self._resetar_confirmacao()
         _dialogo(self, 'Automação concluída', '\n\n'.join(partes), icon)
+        self._instalar_atualizacao()  # se uma atualização ficou aguardando
 
     def _ao_falhar_automacao(self, msg: str):
         self._atualizar_estado()
@@ -991,6 +1225,7 @@ class Interface(QWidget):
             f'Ocorreu um erro:\n{msg}\n\nConsulte o log: {ERROR_LOG}',
             QMessageBox.Critical,
         )
+        self._instalar_atualizacao()
 
     # ── Reescrita da planilha após automação ──────────────────────────────────
 
@@ -1044,15 +1279,24 @@ class Interface(QWidget):
                     _escrever_linha(ws2, prox2, linha["valores"], avisos_por_indice.get(i, "Enviado"))
                     prox2 += 1
 
+        def salvar(caminho):
+            # Grava ao lado e troca: queda de energia não corrompe a planilha
+            temporario = caminho.with_name(caminho.name + ".tmp")
+            try:
+                wb.save(temporario)
+                os.replace(temporario, caminho)
+            finally:
+                temporario.unlink(missing_ok=True)
+
         destino = Path(self.planilha_path)
         try:
-            wb.save(destino)
+            salvar(destino)
         except PermissionError:  # normalmente: planilha aberta no Excel
             logger.warning("Planilha bloqueada, salvando cópia", exc_info=True)
             destino = destino.with_name(
                 f"{destino.stem}_resultado_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
             )
-            wb.save(destino)
+            salvar(destino)
         wb.close()
         return destino
 
@@ -1104,17 +1348,13 @@ class Interface(QWidget):
 
     def _baixar_e_aplicar(self):
         try:
-            from updater import aplicar_atualizacao
+            from updater import baixar_atualizacao
             def _progresso(baixados, total):
                 if total > 0:
                     pct = int(baixados * 100 / total)
                     mb  = baixados / 1_048_576
                     self._sinal_update.emit(f'⬇ {pct}% ({mb:.1f} MB)...', '#2563a8')
-            aplicar_atualizacao(
-                self._info_update["url_download"],
-                self._info_update["versao_nova"],
-                _progresso,
-            )
+            self._novo_exe = baixar_atualizacao(self._info_update["url_download"], _progresso)
             self._sinal_update_concluido.emit()
         except Exception as e:
             logger.exception("Falha ao baixar/aplicar atualização")
@@ -1122,6 +1362,23 @@ class Interface(QWidget):
             self._btn_update.setEnabled(True)
 
     def _ao_update_concluido(self):
+        if self.automacao_em_andamento or self._lote:
+            self._sinal_update.emit('● Atualização pronta: será aplicada ao terminar o envio', '#e9a833')
+            return
+        self._instalar_atualizacao()
+
+    def _instalar_atualizacao(self):
+        if not self._novo_exe:
+            return
+        from updater import instalar_atualizacao
+        novo, self._novo_exe = self._novo_exe, None
+        try:
+            instalar_atualizacao(novo)
+        except Exception:
+            logger.exception("Falha ao aplicar atualização")
+            self._sinal_update.emit('● Erro ao atualizar: clique para tentar novamente', '#c0351a')
+            self._btn_update.setEnabled(True)
+            return
         self.close()
 
     def closeEvent(self, event):
@@ -1134,4 +1391,18 @@ class Interface(QWidget):
             if resp == QMessageBox.No:
                 event.ignore()
                 return
-        event.accept()
+        processos.encerrando.set()
+        self.hide()
+        try:
+            # Primeiro o navegador, para interromper o envio imediatamente
+            encerrar_automacao(self.navegador)
+        finally:
+            self.navegador = None
+            self._aviso_planilha = ""
+            try:
+                self._interromper_lote()
+            except Exception:
+                logger.exception("Falha ao registrar o envio interrompido")
+            if self._aviso_planilha:
+                _dialogo(None, 'Planilha', self._aviso_planilha, QMessageBox.Warning)
+            event.accept()

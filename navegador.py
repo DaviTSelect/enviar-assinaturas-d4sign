@@ -1,4 +1,5 @@
 ﻿import os
+import threading
 import time
 from pathlib import Path
 import sys
@@ -13,6 +14,9 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
 from selenium.common.exceptions import TimeoutException, WebDriverException
+
+import processos
+from catalogo import Catalogo
 
 # Base sempre ao lado do .exe (ou do script em dev)
 _env_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -32,6 +36,28 @@ _CHROME_BINARY_DEFAULT = Path("Chrome") / "GoogleChrome" / "App" / "Chrome-bin" 
 
 # Perfil Chrome dedicado à automação (evita conflito com Chrome do usuário aberto)
 _CHROME_PROFILE_DIR = _env_dir / "chrome_profile"
+
+
+class _ServiceRastreado(Service):
+    """Registra o chromedriver antes de ele abrir o Chrome."""
+
+    def start(self):
+        super().start()
+        try:
+            processos.registrar(self.process.pid)
+        except Exception:
+            self.stop()
+            raise
+
+
+def encerrar_automacao(navegador=None, timeout=5):
+    """Fechamento definitivo: encerra a sessão e mata o que sobrar."""
+    processos.encerrando.set()
+    try:
+        if navegador is not None:
+            navegador.fechar(timeout)
+    finally:
+        processos.encerrar_tudo()
 
 
 def _criar_service():
@@ -54,7 +80,7 @@ def _criar_service():
         )
 
     return (
-        Service(
+        _ServiceRastreado(
             str(drv_path),
             log_output=str(log_dir / "chromedriver.log"),
             service_args=["--verbose"],
@@ -66,6 +92,7 @@ def _criar_service():
 class Navegador:
     def __init__(self, callback_cofres=None, headless=False):
         service, chrome_binary = _criar_service()
+        processos.encerrar_orfaos(_CHROME_PROFILE_DIR)
         opts = Options()
         opts.binary_location = chrome_binary
 
@@ -95,16 +122,66 @@ class Navegador:
         self.emails_inseridos = False
         self.callback_cofres = callback_cofres
         self.instrucoes_confirmadas = False
+        self.catalogo = Catalogo(self.driver, self.url)
+
+    def fechar(self, timeout=5):
+        """
+        Fecha janelas, sessão do WebDriver e processos. O quit() vem primeiro para
+        o Chrome gravar os cookies no perfil; o que não sair a tempo é morto.
+        """
+        def sair():
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+
+        t = threading.Thread(target=sair, daemon=True)
+        t.start()
+        t.join(timeout)
+        processos.encerrar_tudo()
+
+    # ── Login / sessão ────────────────────────────────────────────────────────
+
+    def _estado_login(self, timeout=30):
+        """
+        Espera a página terminar de carregar e responde "autenticado" (o #drop-zone,
+        que só existe após o login, está visível) ou "formulario".
+        """
+        def estado(driver):
+            if driver.execute_script("return document.readyState") != "complete":
+                return False
+            if any(e.is_displayed() for e in driver.find_elements(By.ID, "drop-zone")):
+                return "autenticado"
+            if any(e.is_displayed() for e in driver.find_elements(By.ID, "Passwd")):
+                return "formulario"
+            return False
+
+        try:
+            return WebDriverWait(
+                self.driver, timeout, ignored_exceptions=(WebDriverException,)
+            ).until(estado)
+        except TimeoutException as erro:
+            self._snapshot("0_timeout_login")
+            raise TimeoutException(
+                "O D4Sign não exibiu o painel nem o formulário de login. "
+                "Verifique a conexão e tente novamente."
+            ) from erro
 
 
     def realizar_login(self):
+        """Abre o painel e só autentica se a sessão do perfil não estiver ativa."""
+        self.driver.get(self.url)
+        if self._estado_login() == "autenticado":
+            self.status_login = True
+            print("Sessão já ativa — login ignorado.")
+            return
+        self.status_login = False
         if not USUARIO or not SENHA:
             self.driver.quit()
             raise ValueError(
                 "USUARIO e/ou SENHA não configurados no arquivo .env.\n"
                 f"Verifique o arquivo: {_env_dir / '.env'}"
             )
-        self.driver.get(self.url)
         campo_email = self.wait.until(EC.element_to_be_clickable((By.ID, "Email")))
         campo_email.send_keys(USUARIO)
         campo_senha = self.wait.until(EC.element_to_be_clickable((By.ID, "Passwd")))
@@ -157,37 +234,40 @@ class Navegador:
 
     def garantir_tela_envio(self):
         pass
+
     def carregar_cofres(self):
-        elemento = self.wait.until(
-            EC.element_to_be_clickable(
-                (By.NAME, "uuid-cofre")
-            )
-        )
-
-        select = Select(elemento)
-
-        lista_cofres = []
-
-        for opcao in select.options:
-            texto = opcao.text.strip()
-            valor = opcao.get_attribute("value")
-
-            print(f"Texto: {texto} | Value: {valor}")
-
-            # Ignora a opção "Escolha um cofre"
-            if valor and valor != "0":
-                lista_cofres.append({
-                    "texto": texto,
-                    "valor": valor
-                })
-
-        if not lista_cofres:
-            raise Exception("Nenhum cofre disponível para seleção.")
-
-        self.lista_cofres = lista_cofres
+        """Árvore de cofres do menu lateral; subpastas são carregadas ao expandir."""
+        raizes = self.catalogo.carregar()
+        self.lista_cofres = raizes
         if self.callback_cofres:
-            self.callback_cofres(lista_cofres)
-        return lista_cofres
+            self.callback_cofres(raizes)
+        return raizes
+
+    def expandir_pasta(self, destino):
+        return self.catalogo.expandir(destino)
+
+    def abrir_destino(self, destino):
+        """Abre a tela de envio do cofre ou da subpasta escolhida."""
+        if not destino.uuid_pasta:
+            self.abrir_tela_envio()
+            self.selecionar_cofre(destino.uuid_cofre)
+            return
+
+        self.driver.get(destino.url)
+        espera = WebDriverWait(self.driver, 30)
+        link = espera.until(EC.presence_of_element_located((
+            By.CSS_SELECTOR,
+            f'a[href*="/desk/enviarDocumento/{destino.id_cofre}/{destino.uuid_cofre}/{destino.uuid}"]',
+        )))
+        espera.until(lambda d: d.execute_script("return document.readyState") == "complete")
+        self.driver.execute_script("arguments[0].click();", link)
+        # Só envia se o formulário aponta exatamente para a pasta escolhida
+        espera.until(lambda d: d.execute_script("""
+            const pasta = document.querySelector('#formUpload input[name="uuid-pasta"]');
+            const cofre = document.querySelector('#formUpload input[name="uuid-cofre"]');
+            return !!pasta && !!cofre && pasta.value === arguments[0] && cofre.value === arguments[1]
+                && (!window.jQuery || jQuery.active === 0);
+        """, destino.uuid, destino.uuid_cofre))
 
     def selecionar_cofre(self, valor):
         elemento = self.wait.until(EC.element_to_be_clickable((By.NAME, "uuid-cofre")))
@@ -361,21 +441,18 @@ class Navegador:
             self._snapshot("7_label_nao_encontrado_mas_ok")
             print("Label AGUARDANDO não encontrado, mas email-assinatura visível — prosseguindo.")
 
-    def voltar_para_envio(self, tentativas=3):
-        # Só navega, não envia nada: repetir é seguro
+    def voltar_para_envio(self, destino, tentativas=3):
+        # Só navega (e reautentica se a sessão expirou), não envia nada: repetir é seguro
         for tentativa in range(1, tentativas + 1):
             try:
-                self.driver.get(self.url)
-                WebDriverWait(self.driver, 30).until(
-                    EC.element_to_be_clickable((By.ID, "drop-zone"))
-                )
-                self.abrir_tela_envio()
-                self.selecionar_cofre(self.cofre_selecionado)
+                self.realizar_login()
+                self.abrir_destino(destino)
                 return
             except WebDriverException:
                 self._snapshot(f"0_timeout_voltar_{tentativa}")
-                if tentativa == tentativas:
+                if tentativa == tentativas or processos.encerrando.is_set():
                     raise
+
     def confirmar_envio(self):
         pass
     def adicionar_email(self, email):

@@ -88,34 +88,43 @@ def _baixar_arquivo(url: str, destino: str, callback=None):
                     callback(baixados, total)
 
 
-def aplicar_atualizacao(url_download: str, versao_nova: str,
-                         callback_progresso=None) -> bool:
+def baixar_atualizacao(url_download: str, callback_progresso=None) -> str | None:
+    """Baixa o novo .exe ao lado do atual, sem aplicar. None fora do executável."""
+    if not getattr(sys, "frozen", False):
+        return None
     nome_arq = url_download.split("/")[-1].split("?")[0]
     with tempfile.TemporaryDirectory() as tmp:
         caminho_tmp = os.path.join(tmp, nome_arq)
         _baixar_arquivo(url_download, caminho_tmp, callback_progresso)
-        _aplicar_exe(caminho_tmp)
-    return True
+        novo = sys.executable + ".new"
+        shutil.copy2(caminho_tmp, novo)
+    return novo
 
 
-def _aplicar_exe(caminho_novo_exe: str):
-    exe_atual = sys.executable if getattr(sys, "frozen", False) else None
-    if not exe_atual:
-        return
+def _script_troca(novo: str, atual: str) -> str:
+    # Repete o move: o programa pode levar alguns segundos para fechar o Chrome
+    return "\n".join([
+        "@echo off",
+        "set PYINSTALLER_RESET_ENVIRONMENT=1",
+        "set /a n=0",
+        ":tentar",
+        "ping -n 2 127.0.0.1 >nul",
+        f'move /y "{novo}" "{atual}" >nul 2>&1 && goto abrir',
+        "set /a n+=1",
+        "if %n% lss 60 goto tentar",
+        ":abrir",
+        f'start "" "{atual}"',
+        'del "%~f0"',
+        "",
+    ])
 
-    novo_exe_copia = exe_atual + ".new"
-    shutil.copy2(caminho_novo_exe, novo_exe_copia)
 
-    pasta = Path(exe_atual).parent
-    bat = str(pasta / "_update_replace.bat")
-    with open(bat, "w", encoding="ascii") as f:
-        f.write("@echo off\n")
-        f.write("timeout /t 2 /nobreak >nul\n")
-        f.write(f'move /y "{novo_exe_copia}" "{exe_atual}"\n')
-        f.write(f'start "" "{exe_atual}"\n')
-        f.write('del "%~f0"\n')
-
-    subprocess.Popen(["cmd", "/c", bat], shell=False,
+def instalar_atualizacao(novo_exe: str) -> None:
+    """Agenda a troca do .exe; o programa deve fechar logo em seguida."""
+    atual = sys.executable
+    bat = Path(atual).parent / "_update_replace.bat"
+    bat.write_text(_script_troca(novo_exe, atual), encoding="mbcs")
+    subprocess.Popen(["cmd", "/c", str(bat)], shell=False,
                      creationflags=subprocess.CREATE_NO_WINDOW)
 
 

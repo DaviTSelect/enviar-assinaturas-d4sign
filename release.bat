@@ -36,6 +36,13 @@ if %ERRORLEVEL% equ 0 (
 :: ===================================================
 :: PASSO 1: Enviar repositorio completo para o GitHub
 :: ===================================================
+git diff --quiet HEAD -- planilha_exemplo.xlsx
+if errorlevel 1 (
+    echo ERRO: planilha_exemplo.xlsx foi alterada e pode conter nomes reais.
+    echo Feche o Excel e rode: git restore planilha_exemplo.xlsx
+    pause & exit /b 1
+)
+
 echo [1/6] Enviando repositorio para o GitHub...
 git add .
 git commit -m "chore: release %TAG%" 2>nul
