@@ -5,6 +5,7 @@ import logging
 import re
 import sys
 import threading
+import time
 import unicodedata
 from pathlib import Path
 
@@ -751,7 +752,7 @@ class Interface(QWidget):
 
     def carregar_documentos(self, caminho_planilha, pasta_documentos):
         workbook = load_workbook(caminho_planilha, read_only=True, data_only=True)
-        planilha = workbook.active
+        planilha = workbook.worksheets[0]  # nunca a aba "Enviados"
         linhas_iter = planilha.iter_rows(values_only=True)
         cabecalhos = next(linhas_iter, None)
         if not cabecalhos:
@@ -911,32 +912,44 @@ class Interface(QWidget):
 
     def _enviar_arquivos(self, cofre, documentos, texto):
         erros: dict[int, str] = {}
+        avisos: dict[int, str] = {}
         for i, doc in enumerate(documentos):
             self.sinal_doc_enviando.emit(i)
+            etapa = ""
             try:
+                # Volta à tela de envio antes do próximo, para que uma falha aqui
+                # não seja atribuída a um documento já enviado
+                if i > 0:
+                    etapa = "Não enviado (falha ao voltar para a tela de envio): "
+                    self.navegador.voltar_para_envio()
+                    etapa = ""
                 self.navegador.selecionar_cofre(cofre["valor"])
                 self.navegador.upload_documento(str(Path(doc["nome_arquivo"])))
                 self.navegador.adicionar_emails(doc["emails"])
-                self.navegador.envio_para_assinatura(texto)
-                if i + 1 < len(documentos):
-                    self.navegador.voltar_para_envio()
+                if not self.navegador.envio_para_assinatura(texto):
+                    avisos[i] = "Enviado - sem confirmação do D4Sign, conferir no cofre"
                 self.sinal_doc_enviado.emit(i)
             except Exception as erro:
                 logger.exception(f"Falha no documento [{i}] {doc.get('nome', '')}")
-                msg_erro = str(erro)
+                msg_erro = etapa + str(erro)
                 erros[i] = msg_erro
                 self.sinal_doc_falhou.emit(i, msg_erro)
-                # Tenta recuperar para o próximo documento
-                if i + 1 < len(documentos):
-                    try:
-                        self.navegador.voltar_para_envio()
-                    except Exception:
-                        pass
 
+        self._avisos_envio = len(avisos)
+        self._aviso_planilha = ""
         try:
-            self._atualizar_planilha_resultado(erros)
+            destino = self._atualizar_planilha_resultado(erros, avisos)
+            if Path(destino) != Path(self.planilha_path):
+                self._aviso_planilha = (
+                    "A planilha original estava aberta ou bloqueada e NÃO foi alterada. "
+                    f"O resultado foi salvo em:\n{destino}\nUse este arquivo daqui em diante."
+                )
         except Exception:
             logger.exception("Falha ao atualizar planilha após automação")
+            self._aviso_planilha = (
+                "NÃO foi possível salvar a planilha. Não reprocesse o arquivo antes de "
+                f"conferir no D4Sign. Log: {ERROR_LOG}"
+            )
 
         self.automacao_em_andamento = False
         sucesso = len(documentos) - len(erros)
@@ -951,14 +964,22 @@ class Interface(QWidget):
         ]
         if num_erros:
             partes.append(
-                f'{num_erros} documento(s) com erro foram mantidos na planilha original com a mensagem de erro.'
+                f'{num_erros} documento(s) com erro ficaram na primeira aba, com a mensagem de erro.'
+            )
+        if self._avisos_envio:
+            partes.append(
+                f'{self._avisos_envio} documento(s) sem confirmação do D4Sign (estão na aba '
+                '"Enviados"): confira no cofre.'
             )
         n_dup = len(self._linhas_duplicadas)
         if n_dup:
             partes.append(
                 f'{n_dup} linha(s) ignorada(s) por nome duplicado foram mantidas na planilha.'
             )
-        icon = QMessageBox.Warning if (num_erros or n_dup) else QMessageBox.Information
+        if self._aviso_planilha:
+            partes.append(self._aviso_planilha)
+        alerta = num_erros or n_dup or self._avisos_envio or self._aviso_planilha
+        icon = QMessageBox.Warning if alerta else QMessageBox.Information
         _dialogo(self, 'Automação concluída', '\n\n'.join(partes), icon)
 
     def _ao_falhar_automacao(self, msg: str):
@@ -973,10 +994,11 @@ class Interface(QWidget):
 
     # ── Reescrita da planilha após automação ──────────────────────────────────
 
-    def _atualizar_planilha_resultado(self, erros_por_indice: dict):
+    def _atualizar_planilha_resultado(self, erros_por_indice: dict, avisos_por_indice: dict):
         from openpyxl import load_workbook as _lw
         wb = _lw(self.planilha_path)
-        ws1 = wb.active
+        ws1 = wb.worksheets[0]
+        wb.active = 0
 
         # Encontra ou adiciona coluna "status"
         num_colunas = ws1.max_column or 0
@@ -994,16 +1016,10 @@ class Interface(QWidget):
         if ws1.max_row > 1:
             ws1.delete_rows(2, ws1.max_row - 1)
 
-        # Cria ou limpa aba "Enviados"
-        if "Enviados" in wb.sheetnames:
-            ws2 = wb["Enviados"]
-            if ws2.max_row > 1:
-                ws2.delete_rows(2, ws2.max_row - 1)
-        else:
-            ws2 = wb.create_sheet("Enviados")
-            for c in range(1, idx_status):
-                ws2.cell(1, c, ws1.cell(1, c).value)
-            ws2.cell(1, idx_status, "status")
+        # Aba "Enviados" acumula o histórico: nunca é limpa
+        ws2 = wb["Enviados"] if "Enviados" in wb.sheetnames else wb.create_sheet("Enviados")
+        for c in range(1, max(idx_status, ws1.max_column) + 1):
+            ws2.cell(1, c, ws1.cell(1, c).value)
 
         def _escrever_linha(ws, row, valores, status_val):
             for col, val in enumerate(valores, 1):
@@ -1018,18 +1034,27 @@ class Interface(QWidget):
             prox1 += 1
 
         # Documentos: erro → aba 1, sucesso → aba 2
-        prox2 = 2
+        prox2 = ws2.max_row + 1
         for i, doc in enumerate(self.documentos):
             for linha in doc.get("linhas_planilha", []):
                 if i in erros_por_indice:
                     _escrever_linha(ws1, prox1, linha["valores"], erros_por_indice[i][:250])
                     prox1 += 1
                 else:
-                    _escrever_linha(ws2, prox2, linha["valores"], "Enviado")
+                    _escrever_linha(ws2, prox2, linha["valores"], avisos_por_indice.get(i, "Enviado"))
                     prox2 += 1
 
-        wb.save(self.planilha_path)
+        destino = Path(self.planilha_path)
+        try:
+            wb.save(destino)
+        except PermissionError:  # normalmente: planilha aberta no Excel
+            logger.warning("Planilha bloqueada, salvando cópia", exc_info=True)
+            destino = destino.with_name(
+                f"{destino.stem}_resultado_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+            )
+            wb.save(destino)
         wb.close()
+        return destino
 
     # ── Atualizador automático ────────────────────────────────────────────────
 

@@ -12,7 +12,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 # Base sempre ao lado do .exe (ou do script em dev)
 _env_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -230,9 +230,12 @@ class Navegador:
 
     def _snapshot(self, nome):
         """Salva HTML + URL atuais em logs/snapshots/ para diagnóstico."""
+        # No .exe grava só as falhas: cada página tem ~800 KB e dados de signatários
+        if getattr(sys, "frozen", False) and not ("timeout" in nome or "sem_confirmacao" in nome):
+            return
         try:
-            snap_dir = Path(__file__).resolve().parent / "logs" / "snapshots"
-            snap_dir.mkdir(exist_ok=True)
+            snap_dir = log_dir / "snapshots"
+            snap_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%H%M%S")
             arq = snap_dir / f"{ts}_{nome}.html"
             arq.write_text(
@@ -244,6 +247,19 @@ class Navegador:
             print(f"[snapshot] falha: {e}")
 
     # ── Upload ────────────────────────────────────────────────────────────────
+
+    def _situacao_upload(self):
+        """Texto que o D4Sign exibe no modal quando o upload não avança."""
+        try:
+            for aviso in self.driver.find_elements(By.ID, "resultUp"):
+                texto = " ".join(aviso.text.split())
+                if texto:
+                    return f"Mensagem do D4Sign: {texto}. "
+            if any(p.is_displayed() for p in self.driver.find_elements(By.ID, "progress")):
+                return "Upload ainda em andamento. "
+        except WebDriverException:
+            pass
+        return ""
 
     def upload_documento(self, caminho_arquivo):
         caminho_arquivo = str(Path(caminho_arquivo).resolve())
@@ -292,6 +308,7 @@ class Navegador:
         except TimeoutException as erro:
             self._snapshot("4_timeout_viewblob")
             raise TimeoutException(
+                f"{self._situacao_upload()}"
                 "O D4Sign não abriu a tela do documento após selecionar o arquivo "
                 f"(URL: {self.driver.current_url}; título: {self.driver.title}). "
                 "Verifique se o upload foi aceito e se apareceu alguma mensagem no site."
@@ -344,11 +361,21 @@ class Navegador:
             self._snapshot("7_label_nao_encontrado_mas_ok")
             print("Label AGUARDANDO não encontrado, mas email-assinatura visível — prosseguindo.")
 
-    def voltar_para_envio(self):
-        self.driver.get(self.url)
-        self.wait.until(EC.element_to_be_clickable((By.ID, "drop-zone")))
-        self.abrir_tela_envio()
-        self.selecionar_cofre(self.cofre_selecionado)
+    def voltar_para_envio(self, tentativas=3):
+        # Só navega, não envia nada: repetir é seguro
+        for tentativa in range(1, tentativas + 1):
+            try:
+                self.driver.get(self.url)
+                WebDriverWait(self.driver, 30).until(
+                    EC.element_to_be_clickable((By.ID, "drop-zone"))
+                )
+                self.abrir_tela_envio()
+                self.selecionar_cofre(self.cofre_selecionado)
+                return
+            except WebDriverException:
+                self._snapshot(f"0_timeout_voltar_{tentativa}")
+                if tentativa == tentativas:
+                    raise
     def confirmar_envio(self):
         pass
     def adicionar_email(self, email):
@@ -523,6 +550,23 @@ class Navegador:
         botao_salvar = self.wait.until(EC.element_to_be_clickable((By.ID, "btnSalvarDocumento")))
         self._clicar(botao_salvar)
         print("Mensagem salva; envio para assinatura solicitado.")
+        return self._aguardar_conclusao_envio()
+
+    def _aguardar_conclusao_envio(self, timeout=30):
+        """
+        Espera o modal sumir e as requisições terminarem antes de sair da página.
+        Nunca levanta erro: o clique já foi feito e reenviar duplicaria o documento.
+        """
+        try:
+            espera = WebDriverWait(self.driver, timeout, ignored_exceptions=(WebDriverException,))
+            espera.until(EC.invisibility_of_element_located((By.ID, "btnSalvarDocumento")))
+            espera.until(lambda d: d.execute_script(
+                "return document.readyState === 'complete' && (!window.jQuery || jQuery.active === 0);"
+            ))
+            return True
+        except WebDriverException:
+            self._snapshot("11_sem_confirmacao_envio")
+            return False
 
     def realizar_envio_completo(self, documento, texto):
         nome = documento["nome"]
